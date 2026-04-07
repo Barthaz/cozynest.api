@@ -1,14 +1,12 @@
-const { collections, products } = require("../data/mockData");
-
 const getCollections = (req, res) => {
   return res.status(200).json({
-    data: collections,
+    data: [],
   });
 };
 
 const getProducts = (req, res) => {
   return res.status(200).json({
-    data: products,
+    data: [],
   });
 };
 
