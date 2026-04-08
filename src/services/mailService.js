@@ -41,7 +41,7 @@ const renderTemplate = (templateName, variables) => {
   return html;
 };
 
-const sendNewsletterWelcomeEmail = async (toEmail) => {
+const sendNewsletterWelcomeEmail = async (toEmail, promoCodeData = null) => {
   if (!isMailEnabled()) {
     return { sent: false, reason: "mail_disabled" };
   }
@@ -52,17 +52,23 @@ const sendNewsletterWelcomeEmail = async (toEmail) => {
     process.env.MAIL_NEWSLETTER_SUBJECT || "Witaj w newsletterze Cozy Nest";
   const html = renderTemplate("newsletter-welcome.html", {
     email: toEmail,
+    promoCode: promoCodeData?.code || "",
+    promoValue: promoCodeData?.value || "",
   });
   const text = [
     "Witaj w Cozy Nest!",
     "",
     "Dziekujemy za zapis do newslettera.",
     `Adres zapisu: ${toEmail}`,
+    promoCodeData?.code ? `Kod promocyjny: ${promoCodeData.code}` : "",
+    promoCodeData?.value ? `Wartosc rabatu: ${promoCodeData.value}%` : "",
     "",
     "Nowosci i inspiracje: https://cozy-nest.pl/",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
-  await transporter.sendMail({
+  const info = await transporter.sendMail({
     from,
     to: toEmail,
     subject,
@@ -70,7 +76,13 @@ const sendNewsletterWelcomeEmail = async (toEmail) => {
     text,
   });
 
-  return { sent: true };
+  return {
+    sent: true,
+    messageId: info?.messageId || null,
+    accepted: info?.accepted || [],
+    rejected: info?.rejected || [],
+    response: info?.response || null,
+  };
 };
 
 module.exports = {

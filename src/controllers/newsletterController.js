@@ -1,5 +1,7 @@
 const pool = require("../config/db");
+const promoCodeModel = require("../models/promoCodeModel");
 const { sendNewsletterWelcomeEmail } = require("../services/mailService");
+const { createPromoCodeForEmail } = require("../services/promoCodeService");
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -29,6 +31,12 @@ const sendTestNewsletterEmail = async (req, res) => {
       message: "Test email sent successfully.",
       data: {
         email: normalizedEmail,
+        delivery: {
+          messageId: emailResult.messageId || null,
+          accepted: emailResult.accepted || [],
+          rejected: emailResult.rejected || [],
+          response: emailResult.response || null,
+        },
       },
     });
   } catch (error) {
@@ -67,10 +75,20 @@ const subscribeToNewsletter = async (req, res) => {
       [normalizedEmail]
     );
 
+    let emailResult;
+    let promoCodeResult;
+
     try {
-      const emailResult = await sendNewsletterWelcomeEmail(normalizedEmail);
+      promoCodeResult = await createPromoCodeForEmail(normalizedEmail);
+      emailResult = await sendNewsletterWelcomeEmail(
+        normalizedEmail,
+        promoCodeResult
+      );
 
       if (!emailResult.sent) {
+        if (promoCodeResult?.id) {
+          await promoCodeModel.deleteById(promoCodeResult.id);
+        }
         await pool.execute("DELETE FROM newsletter_subscribers WHERE id = ?", [
           result.insertId,
         ]);
@@ -80,7 +98,11 @@ const subscribeToNewsletter = async (req, res) => {
           details: emailResult.reason || "mail_not_sent",
         });
       }
+
     } catch (mailError) {
+      if (promoCodeResult?.id) {
+        await promoCodeModel.deleteById(promoCodeResult.id);
+      }
       await pool.execute("DELETE FROM newsletter_subscribers WHERE id = ?", [
         result.insertId,
       ]);
@@ -102,6 +124,15 @@ const subscribeToNewsletter = async (req, res) => {
         id: result.insertId,
         email: normalizedEmail,
         emailSent: true,
+        promoCode: promoCodeResult?.code || null,
+        promoValue: promoCodeResult?.value || null,
+        promoType: promoCodeResult?.type || null,
+        delivery: {
+          messageId: emailResult.messageId || null,
+          accepted: emailResult.accepted || [],
+          rejected: emailResult.rejected || [],
+          response: emailResult.response || null,
+        },
       },
     });
   } catch (error) {

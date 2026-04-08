@@ -5,6 +5,7 @@ const { version } = require("../package.json");
 
 const newsletterRoutes = require("./routes/newsletterRoutes");
 const catalogRoutes = require("./routes/catalogRoutes");
+const promoCodeRoutes = require("./routes/promoCodeRoutes");
 
 const app = express();
 
@@ -143,5 +144,6 @@ app.get("/healthcheck", async (req, res) => {
 
 app.use("/api", newsletterRoutes);
 app.use("/api", catalogRoutes);
+app.use("/api", promoCodeRoutes);
 
 module.exports = app;
