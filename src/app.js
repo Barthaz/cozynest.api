@@ -6,10 +6,13 @@ const { version } = require("../package.json");
 const newsletterRoutes = require("./routes/newsletterRoutes");
 const catalogRoutes = require("./routes/catalogRoutes");
 const promoCodeRoutes = require("./routes/promoCodeRoutes");
+const orderRoutes = require("./routes/orderRoutes");
+const stripeWebhookRoutes = require("./routes/stripeWebhookRoutes");
 
 const app = express();
 
 app.use(cors());
+app.use("/api/payments", stripeWebhookRoutes);
 app.use(express.json());
 
 app.get("/health", (req, res) => {
@@ -145,5 +148,6 @@ app.get("/healthcheck", async (req, res) => {
 app.use("/api", newsletterRoutes);
 app.use("/api", catalogRoutes);
 app.use("/api", promoCodeRoutes);
+app.use("/api", orderRoutes);
 
 module.exports = app;

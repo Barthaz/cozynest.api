@@ -41,6 +41,23 @@ const renderTemplate = (templateName, variables) => {
   return html;
 };
 
+const formatMoney = (value) => Number(value || 0).toFixed(2);
+
+const buildOrderItemsRowsHtml = (items, currency) => {
+  return items
+    .map(
+      (item) => `<tr>
+        <td style="padding:10px 0;border-bottom:1px solid #eee7d9;color:#111111;">
+          <div style="font-weight:700;">${item.product_name}</div>
+          <div style="font-size:12px;color:#6b7280;">${item.variant_color} / ${item.variant_size}</div>
+        </td>
+        <td align="right" style="padding:10px 0;border-bottom:1px solid #eee7d9;color:#111111;">${item.quantity}</td>
+        <td align="right" style="padding:10px 0;border-bottom:1px solid #eee7d9;color:#111111;">${formatMoney(item.line_total)} ${currency}</td>
+      </tr>`
+    )
+    .join("");
+};
+
 const sendNewsletterWelcomeEmail = async (toEmail, promoCodeData = null) => {
   if (!isMailEnabled()) {
     return { sent: false, reason: "mail_disabled" };
@@ -85,6 +102,53 @@ const sendNewsletterWelcomeEmail = async (toEmail, promoCodeData = null) => {
   };
 };
 
+const sendOrderPaidEmail = async ({ order, items }) => {
+  if (!isMailEnabled()) {
+    return { sent: false, reason: "mail_disabled" };
+  }
+
+  const transporter = createTransporter();
+  const from = process.env.MAIL_FROM;
+  const subject =
+    process.env.MAIL_ORDER_PAID_SUBJECT || `Twoje zamowienie ${order.order_number} zostalo oplacone`;
+  const currency = order.currency || "PLN";
+  const html = renderTemplate("order-paid.html", {
+    customerFullName: order.customer_full_name,
+    orderNumber: order.order_number,
+    createdAt: new Date(order.created_at).toLocaleString("pl-PL"),
+    paymentMethod: order.payment_method,
+    deliveryMethod: order.delivery_method,
+    itemsRows: buildOrderItemsRowsHtml(items, currency),
+    subtotalAmount: formatMoney(order.subtotal_amount),
+    discountAmount: formatMoney(order.discount_amount),
+    shippingAmount: formatMoney(order.shipping_amount),
+    finalAmount: formatMoney(order.final_amount),
+    currency,
+  });
+  const text = [
+    `Dziekujemy za zamowienie ${order.order_number}.`,
+    "Platnosc zostala potwierdzona.",
+    `Kwota: ${formatMoney(order.final_amount)} ${currency}`,
+  ].join("\n");
+
+  const info = await transporter.sendMail({
+    from,
+    to: order.customer_email,
+    subject,
+    html,
+    text,
+  });
+
+  return {
+    sent: true,
+    messageId: info?.messageId || null,
+    accepted: info?.accepted || [],
+    rejected: info?.rejected || [],
+    response: info?.response || null,
+  };
+};
+
 module.exports = {
   sendNewsletterWelcomeEmail,
+  sendOrderPaidEmail,
 };
