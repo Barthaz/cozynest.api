@@ -2,6 +2,7 @@ const pool = require("../config/db");
 const orderModel = require("../models/orderModel");
 const orderItemModel = require("../models/orderItemModel");
 const orderStatusHistoryModel = require("../models/orderStatusHistoryModel");
+const promoCodeModel = require("../models/promoCodeModel");
 const { createCheckoutSession } = require("../services/stripeService");
 
 const toMoney = (value) => Number(Number(value || 0).toFixed(2));
@@ -59,6 +60,7 @@ const createOrder = async (req, res) => {
     currency = "PLN",
     discountCode = null,
     discountPercent = 0,
+    promoCode = null,
     shippingAmount = 0,
     notesCustomer = null,
     items,
@@ -122,22 +124,71 @@ const createOrder = async (req, res) => {
   const subtotalAmount = toMoney(
     normalizedItems.reduce((sum, item) => sum + item.lineTotal, 0)
   );
-  const normalizedDiscountPercent = toMoney(discountPercent);
-  const discountAmount = toMoney(
-    subtotalAmount * (normalizedDiscountPercent / 100)
-  );
-  const normalizedShippingAmount = toMoney(shippingAmount);
-  const finalAmount = toMoney(
-    subtotalAmount - discountAmount + normalizedShippingAmount
-  );
 
   const connection = await pool.getConnection();
 
   let orderId = null;
   let orderNumber = null;
+  let normalizedDiscountPercent = toMoney(discountPercent);
+  let discountAmount = toMoney(
+    subtotalAmount * (normalizedDiscountPercent / 100)
+  );
+  let normalizedShippingAmount = toMoney(shippingAmount);
+  let finalAmount = toMoney(
+    subtotalAmount - discountAmount + normalizedShippingAmount
+  );
+  let appliedDiscountCode = discountCode;
 
   try {
     await connection.beginTransaction();
+
+    let promoRowId = null;
+
+    if (promoCode) {
+      const normalizedPromoCode = promoCodeModel.normalizeCode(promoCode);
+
+      if (!/^[A-Z0-9]{8}$/.test(normalizedPromoCode)) {
+        await connection.rollback();
+        return res.status(400).json({
+          error: "Invalid promo code format.",
+        });
+      }
+
+      const promo = await promoCodeModel.findByCodeForUpdate(
+        connection,
+        normalizedPromoCode
+      );
+
+      if (!promo) {
+        await connection.rollback();
+        return res.status(404).json({
+          error: "Promo code not found.",
+        });
+      }
+
+      if (promo.email !== String(customerEmail).trim().toLowerCase()) {
+        await connection.rollback();
+        return res.status(403).json({
+          error: "Promo code is not valid for this email address.",
+        });
+      }
+
+      if (promo.type === "single_use" && promo.is_used) {
+        await connection.rollback();
+        return res.status(409).json({
+          error: "Promo code has already been used.",
+        });
+      }
+
+      normalizedDiscountPercent = toMoney(promo.value);
+      discountAmount = toMoney(subtotalAmount * (normalizedDiscountPercent / 100));
+      normalizedShippingAmount = toMoney(shippingAmount);
+      finalAmount = toMoney(
+        Math.max(0, subtotalAmount - discountAmount + normalizedShippingAmount)
+      );
+      appliedDiscountCode = promo.code;
+      promoRowId = promo.id;
+    }
 
     orderNumber = await orderModel.generateUniqueOrderNumber(connection);
     orderId = await orderModel.createOrder(connection, {
@@ -156,7 +207,7 @@ const createOrder = async (req, res) => {
       deliveryMethod,
       currency,
       subtotalAmount,
-      discountCode,
+      discountCode: appliedDiscountCode,
       discountPercent: normalizedDiscountPercent,
       discountAmount,
       shippingAmount: normalizedShippingAmount,
@@ -176,6 +227,10 @@ const createOrder = async (req, res) => {
       comment: "Order created",
       changedBy: "system",
     });
+
+    if (promoCode) {
+      await promoCodeModel.markUsedIfSingleUse(connection, promoRowId);
+    }
 
     await connection.commit();
   } catch (error) {
@@ -212,7 +267,7 @@ const createOrder = async (req, res) => {
         status: "pending_payment",
         currency,
         subtotalAmount,
-        discountCode,
+        discountCode: appliedDiscountCode,
         discountPercent: normalizedDiscountPercent,
         discountAmount,
         shippingAmount: normalizedShippingAmount,
