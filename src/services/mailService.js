@@ -1,6 +1,7 @@
 const nodemailer = require("nodemailer");
 const fs = require("fs");
 const path = require("path");
+const { getCheckoutPaidPaymentMethodLabel } = require("./stripeService");
 
 const isMailEnabled = () => process.env.MAIL_ENABLED === "true";
 const toBool = (value, fallback = false) => {
@@ -42,6 +43,97 @@ const renderTemplate = (templateName, variables) => {
 };
 
 const formatMoney = (value) => Number(value || 0).toFixed(2);
+
+const escapeHtmlMail = (value) =>
+  String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const buildShippingAddressHtml = (order) => {
+  const streetLine = [order.shipping_street, order.shipping_house_number]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const apt = order.shipping_apartment_number
+    ? `lok. ${String(order.shipping_apartment_number).trim()}`
+    : null;
+  const cityLine = [order.shipping_postal_code, order.shipping_city]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const lines = [
+    streetLine,
+    apt,
+    cityLine,
+    order.shipping_region,
+    order.shipping_country,
+  ].filter((line) => line && String(line).trim());
+
+  if (lines.length === 0) {
+    return escapeHtmlMail("—");
+  }
+
+  return lines.map((line) => escapeHtmlMail(String(line).trim())).join("<br />");
+};
+
+const buildShippingAddressText = (order) => {
+  const streetLine = [order.shipping_street, order.shipping_house_number]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const apt = order.shipping_apartment_number
+    ? `lok. ${String(order.shipping_apartment_number).trim()}`
+    : null;
+  const cityLine = [order.shipping_postal_code, order.shipping_city]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const lines = [
+    streetLine,
+    apt,
+    cityLine,
+    order.shipping_region,
+    order.shipping_country,
+  ].filter((line) => line && String(line).trim());
+
+  return lines.length ? lines.map((l) => String(l).trim()).join("\n") : "—";
+};
+
+const formatStoredPaymentMethodForEmail = (raw) => {
+  const v = String(raw || "")
+    .trim()
+    .toLowerCase();
+  const map = {
+    blik: "BLIK",
+    karta: "Karta płatnicza",
+    card: "Karta płatnicza",
+    przelew: "Przelew bankowy",
+    stripe: "Płatność online",
+    online: "Płatność online",
+  };
+  if (map[v]) return map[v];
+  if (!v) return "Płatność online";
+  return String(raw).trim();
+};
+
+const formatDeliveryMethodForEmail = (raw) => {
+  const v = String(raw || "")
+    .trim()
+    .toLowerCase();
+  const map = {
+    kurier: "Kurier",
+    paczkomat: "Paczkomat InPost",
+    paczkomaty: "Paczkomat InPost",
+    odbior_osobisty: "Odbiór osobisty",
+    odbiór_osobisty: "Odbiór osobisty",
+  };
+  if (map[v]) return map[v];
+  if (!v) return "—";
+  return String(raw).trim();
+};
 
 const buildOrderItemsRowsHtml = (items, currency) => {
   return items
@@ -102,7 +194,7 @@ const sendNewsletterWelcomeEmail = async (toEmail, promoCodeData = null) => {
   };
 };
 
-const sendOrderPaidEmail = async ({ order, items }) => {
+const sendOrderPaidEmail = async ({ order, items, checkoutSession = null }) => {
   if (!isMailEnabled()) {
     return { sent: false, reason: "mail_disabled" };
   }
@@ -112,12 +204,22 @@ const sendOrderPaidEmail = async ({ order, items }) => {
   const subject =
     process.env.MAIL_ORDER_PAID_SUBJECT || `Twoje zamowienie ${order.order_number} zostalo oplacone`;
   const currency = order.currency || "PLN";
+
+  const paymentFromStripe = checkoutSession
+    ? await getCheckoutPaidPaymentMethodLabel(checkoutSession)
+    : null;
+  const paymentMethod =
+    paymentFromStripe || formatStoredPaymentMethodForEmail(order.payment_method);
+  const deliveryMethod = formatDeliveryMethodForEmail(order.delivery_method);
+  const shippingAddressHtml = buildShippingAddressHtml(order);
+
   const html = renderTemplate("order-paid.html", {
     customerFullName: order.customer_full_name,
     orderNumber: order.order_number,
     createdAt: new Date(order.created_at).toLocaleString("pl-PL"),
-    paymentMethod: order.payment_method,
-    deliveryMethod: order.delivery_method,
+    paymentMethod,
+    deliveryMethod,
+    shippingAddressHtml,
     itemsRows: buildOrderItemsRowsHtml(items, currency),
     subtotalAmount: formatMoney(order.subtotal_amount),
     discountAmount: formatMoney(order.discount_amount),
@@ -128,7 +230,11 @@ const sendOrderPaidEmail = async ({ order, items }) => {
   const text = [
     `Dziekujemy za zamowienie ${order.order_number}.`,
     "Platnosc zostala potwierdzona.",
+    `Metoda platnosci: ${paymentMethod}`,
     `Kwota: ${formatMoney(order.final_amount)} ${currency}`,
+    "",
+    "Adres dostawy:",
+    buildShippingAddressText(order),
   ].join("\n");
 
   const info = await transporter.sendMail({

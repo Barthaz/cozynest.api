@@ -3,9 +3,17 @@ const orderModel = require("../models/orderModel");
 const orderItemModel = require("../models/orderItemModel");
 const orderStatusHistoryModel = require("../models/orderStatusHistoryModel");
 const promoCodeModel = require("../models/promoCodeModel");
+const productModel = require("../models/productModel");
 const { createCheckoutSession } = require("../services/stripeService");
 
 const toMoney = (value) => Number(Number(value || 0).toFixed(2));
+
+const readNumericEnv = (key, fallback) => {
+  const raw = process.env[key];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+};
 
 const getOrderPaymentStatus = async (req, res) => {
   const orderNumber = String(req.params.orderNumber || "").trim();
@@ -125,6 +133,26 @@ const createOrder = async (req, res) => {
     normalizedItems.reduce((sum, item) => sum + item.lineTotal, 0)
   );
 
+  let pricingMaps;
+  try {
+    pricingMaps = await productModel.findByIdsAndSlugsForPricing(pool, normalizedItems);
+  } catch (error) {
+    return res.status(500).json({
+      error: "Failed to load product prices for validation.",
+      details: error?.message || "Unknown pricing error.",
+    });
+  }
+
+  for (const item of normalizedItems) {
+    const row = productModel.resolvePricingRow(pricingMaps, item);
+    if (!row) {
+      return res.status(400).json({
+        error: "Unknown product in order line.",
+        details: `Brak produktu w katalogu dla id=${item.productId ?? "—"}, slug=${item.productSlug ?? "—"}.`,
+      });
+    }
+  }
+
   const connection = await pool.getConnection();
 
   let orderId = null;
@@ -138,6 +166,8 @@ const createOrder = async (req, res) => {
     subtotalAmount - discountAmount + normalizedShippingAmount
   );
   let appliedDiscountCode = discountCode;
+  let initialOrderStatus = "new";
+  let postCommitPriceSuspicious = false;
 
   try {
     await connection.beginTransaction();
@@ -190,6 +220,32 @@ const createOrder = async (req, res) => {
       promoRowId = promo.id;
     }
 
+    let expectedSubtotal = 0;
+    for (const item of normalizedItems) {
+      const row = productModel.resolvePricingRow(pricingMaps, item);
+      const unit = toMoney(productModel.effectiveUnitPriceFromRow(row));
+      expectedSubtotal = toMoney(expectedSubtotal + unit * item.quantity);
+    }
+
+    const expectedDiscountAmount = toMoney(
+      expectedSubtotal * (normalizedDiscountPercent / 100)
+    );
+    const expectedFinal = toMoney(
+      Math.max(0, expectedSubtotal - expectedDiscountAmount) + normalizedShippingAmount
+    );
+
+    const tolerancePercent = readNumericEnv("ORDER_PRICE_TOLERANCE_PERCENT", 3);
+    const toleranceFixed = toMoney(readNumericEnv("ORDER_PRICE_TOLERANCE_FIXED", 0.02));
+    const minAllowedFinal = toMoney(
+      Math.max(0, expectedFinal * (1 - tolerancePercent / 100) - toleranceFixed)
+    );
+    const priceOk = toMoney(finalAmount - minAllowedFinal) >= 0;
+
+    initialOrderStatus = priceOk ? "new" : "podejrzane";
+    const notesInternal = priceOk
+      ? null
+      : `Walidacja kwoty: wg katalogu ref. ${expectedFinal} (min. dozwolone ~${minAllowedFinal} przy tolerancji ${tolerancePercent}% + ${toleranceFixed}), przesłano ${finalAmount}.`;
+
     orderNumber = await orderModel.generateUniqueOrderNumber(connection);
     orderId = await orderModel.createOrder(connection, {
       orderNumber,
@@ -212,9 +268,9 @@ const createOrder = async (req, res) => {
       discountAmount,
       shippingAmount: normalizedShippingAmount,
       finalAmount,
-      status: "new",
+      status: initialOrderStatus,
       notesCustomer,
-      notesInternal: null,
+      notesInternal,
       ipAddress: req.ip || null,
       userAgent: req.get("user-agent") || null,
     });
@@ -223,16 +279,19 @@ const createOrder = async (req, res) => {
     await orderStatusHistoryModel.addStatusHistoryEntry(connection, {
       orderId,
       oldStatus: null,
-      newStatus: "new",
-      comment: "Order created",
+      newStatus: initialOrderStatus,
+      comment: priceOk
+        ? "Order created"
+        : "Utworzono jako podejrzane — przesłana kwota niższa niż wynika z cen w katalogu (bez płatności).",
       changedBy: "system",
     });
 
-    if (promoCode) {
+    if (promoCode && priceOk) {
       await promoCodeModel.markUsedIfSingleUse(connection, promoRowId);
     }
 
     await connection.commit();
+    postCommitPriceSuspicious = initialOrderStatus === "podejrzane";
   } catch (error) {
     await connection.rollback();
     return res.status(500).json({
@@ -241,6 +300,26 @@ const createOrder = async (req, res) => {
     });
   } finally {
     connection.release();
+  }
+
+  if (postCommitPriceSuspicious) {
+    return res.status(422).json({
+      error:
+        "Nie udało się przejść do płatności — kwoty zamówienia nie pokrywają się z aktualnymi cenami w sklepie (możliwa manipulacja ceną po stronie klienta).",
+      code: "price_mismatch",
+      data: {
+        id: orderId,
+        orderNumber,
+        status: "podejrzane",
+        currency,
+        subtotalAmount,
+        discountCode: appliedDiscountCode,
+        discountPercent: normalizedDiscountPercent,
+        discountAmount,
+        shippingAmount: normalizedShippingAmount,
+        finalAmount,
+      },
+    });
   }
 
   try {
