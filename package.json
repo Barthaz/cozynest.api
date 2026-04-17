@@ -1,6 +1,6 @@
 {
   "name": "cozy-nest.api",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "API for Cozy Nest shop",
   "main": "src/server.js",
   "scripts": {

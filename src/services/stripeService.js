@@ -71,7 +71,42 @@ const constructWebhookEvent = (rawBody, signature) => {
   return stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
 };
 
+const checkStripeHealth = async () => {
+  if (!process.env.STRIPE_SECRET_KEY) {
+    return {
+      status: "not_configured",
+      message: "Missing STRIPE_SECRET_KEY.",
+      mode: null,
+    };
+  }
+
+  try {
+    const stripe = getStripeClient();
+    await stripe.balance.retrieve();
+
+    const secretKey = process.env.STRIPE_SECRET_KEY;
+    const mode = secretKey.startsWith("sk_live")
+      ? "live"
+      : secretKey.startsWith("sk_test")
+        ? "test"
+        : "unknown";
+
+    return {
+      status: "connected",
+      message: "Stripe API connection is working.",
+      mode,
+    };
+  } catch (error) {
+    return {
+      status: "disconnected",
+      message: error?.message || "Stripe API connection failed.",
+      mode: null,
+    };
+  }
+};
+
 module.exports = {
   createCheckoutSession,
   constructWebhookEvent,
+  checkStripeHealth,
 };

@@ -2,12 +2,21 @@ const express = require("express");
 const cors = require("cors");
 const pool = require("./config/db");
 const { version } = require("../package.json");
+const { checkStripeHealth } = require("./services/stripeService");
 
 const newsletterRoutes = require("./routes/newsletterRoutes");
 const catalogRoutes = require("./routes/catalogRoutes");
 const promoCodeRoutes = require("./routes/promoCodeRoutes");
 const orderRoutes = require("./routes/orderRoutes");
 const stripeWebhookRoutes = require("./routes/stripeWebhookRoutes");
+
+const escapeHtml = (value) =>
+  String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 
 const app = express();
 
@@ -49,8 +58,37 @@ app.get("/healthcheck", async (req, res) => {
     dbMessage = error?.message || "Database connection failed.";
   }
 
-  const statusColor = dbStatus === "connected" ? "#15803d" : "#b91c1c";
-  const statusBg = dbStatus === "connected" ? "#dcfce7" : "#fee2e2";
+  const stripeHealth = await checkStripeHealth();
+  const stripeStatus = stripeHealth.status;
+  const stripeMessage = stripeHealth.message;
+  const stripeMode = stripeHealth.mode || "n/a";
+  const stripeWebhookSecretConfigured = Boolean(process.env.STRIPE_WEBHOOK_SECRET);
+
+  const safeDbMessage = escapeHtml(dbMessage);
+  const safeStripeMessage = escapeHtml(stripeMessage);
+  const safeStripeMode = escapeHtml(stripeMode);
+
+  const dbStatusColor = dbStatus === "connected" ? "#15803d" : "#b91c1c";
+  const dbStatusBg = dbStatus === "connected" ? "#dcfce7" : "#fee2e2";
+
+  const stripeStatusColor =
+    stripeStatus === "connected"
+      ? "#15803d"
+      : stripeStatus === "not_configured"
+        ? "#ca8a04"
+        : "#b91c1c";
+  const stripeStatusBg =
+    stripeStatus === "connected"
+      ? "#dcfce7"
+      : stripeStatus === "not_configured"
+        ? "#fef9c3"
+        : "#fee2e2";
+
+  const overallOk =
+    dbStatus === "connected" &&
+    stripeStatus === "connected" &&
+    stripeWebhookSecretConfigured;
+  const overallStatusCode = overallOk ? dbStatusCode : 503;
 
   const html = `<!doctype html>
 <html lang="en">
@@ -104,8 +142,6 @@ app.get("/healthcheck", async (req, res) => {
       border-radius: 999px;
       padding: 4px 10px;
       font-weight: 700;
-      background: ${statusBg};
-      color: ${statusColor};
       text-transform: uppercase;
       font-size: 12px;
       letter-spacing: 0.3px;
@@ -127,11 +163,27 @@ app.get("/healthcheck", async (req, res) => {
       </div>
       <div class="row">
         <span class="label">Database status</span>
-        <span class="badge">${dbStatus}</span>
+        <span class="badge" style="background:${dbStatusBg};color:${dbStatusColor};">${dbStatus}</span>
       </div>
       <div class="row">
         <span class="label">Database details</span>
-        <strong>${dbMessage}</strong>
+        <strong>${safeDbMessage}</strong>
+      </div>
+      <div class="row">
+        <span class="label">Stripe status</span>
+        <span class="badge" style="background:${stripeStatusBg};color:${stripeStatusColor};">${stripeStatus}</span>
+      </div>
+      <div class="row">
+        <span class="label">Stripe mode</span>
+        <strong>${safeStripeMode}</strong>
+      </div>
+      <div class="row">
+        <span class="label">Stripe webhook secret</span>
+        <strong>${stripeWebhookSecretConfigured ? "configured" : "missing"}</strong>
+      </div>
+      <div class="row">
+        <span class="label">Stripe details</span>
+        <strong>${safeStripeMessage}</strong>
       </div>
       <div class="row">
         <span class="label">Timestamp</span>
@@ -142,7 +194,7 @@ app.get("/healthcheck", async (req, res) => {
 </body>
 </html>`;
 
-  return res.status(dbStatusCode).type("html").send(html);
+  return res.status(overallStatusCode).type("html").send(html);
 });
 
 app.use("/api", newsletterRoutes);
